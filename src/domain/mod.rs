@@ -1,3 +1,3 @@
-mod entities;
+mod user;
 
-pub use entities::User;
+pub use user::User;
