@@ -9,7 +9,7 @@ use sqlx::{postgres::PgPoolOptions, PgPool};
 
 use crate::{
     configuration::{DatabaseSettings, Settings},
-    routes::register,
+    routes::{forgot_password, register},
 };
 
 pub struct Application {
@@ -62,7 +62,11 @@ pub async fn run(
     let base_url = Data::new(ApplicationBaseUrl(base_url));
     let server = HttpServer::new(move || {
         App::new()
-            .service(web::scope("/api/v1").route("/register", web::post().to(register)))
+            .service(
+                web::scope("/api/v1")
+                    .route("/register", web::post().to(register))
+                    .route("/forgot-password", web::post().to(forgot_password)),
+            )
             .app_data(db_pool.clone())
             .app_data(base_url.clone())
     })
