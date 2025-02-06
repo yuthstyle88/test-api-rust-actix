@@ -1,3 +1,5 @@
 mod password;
+mod jwt;
 
-pub use password::compute_password_hash;
+pub use password::*;
+pub use jwt::*;
