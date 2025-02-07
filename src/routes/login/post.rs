@@ -1,8 +1,5 @@
-use actix_web::{
-    web::{self, Json},
-    HttpResponse, ResponseError,
-};
-use anyhow::Ok;
+use actix_web::{http::StatusCode, web, HttpResponse, ResponseError};
+use anyhow::Context;
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::PgPool;
@@ -22,7 +19,7 @@ pub struct LoginData {
 #[derive(thiserror::Error, Debug)]
 pub enum LoginError {
     #[error("Authentication failed")]
-    AuthError(#[source] anyhow::Error),
+    AuthError,
 
     #[error("Invalid email format")]
     InvalidEmailFormatError,
@@ -38,17 +35,19 @@ struct ErrorResponse {
 }
 
 impl ResponseError for LoginError {
+    fn status_code(&self) -> StatusCode {
+        match self {
+            Self::AuthError | Self::InvalidEmailFormatError => StatusCode::BAD_REQUEST,
+            Self::UnexpectedError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
     fn error_response(&self) -> HttpResponse {
         let response = ErrorResponse {
             message: self.to_string(),
             timestamp: Utc::now().to_rfc3339(),
         };
-        match self {
-            LoginError::InvalidEmailFormatError | LoginError::AuthError(_) => {
-                HttpResponse::BadRequest().json(response)
-            }
-            LoginError::UnexpectedError(_) => HttpResponse::InternalServerError().json(response),
-        }
+        HttpResponse::build(self.status_code()).json(response)
     }
 }
 
@@ -59,7 +58,7 @@ struct Token {
 }
 
 pub async fn login(
-    login_data: Json<LoginData>,
+    login_data: web::Json<LoginData>,
     pool: web::Data<PgPool>,
 ) -> Result<HttpResponse, LoginError> {
     if !is_valid_email(&login_data.email) {
@@ -73,9 +72,9 @@ pub async fn login(
 
     let user_id = validate_credentials(credentials, &pool)
         .await
-        .map_err(LoginError::AuthError)?;
+        .context("Failed to validate credentials")?;
 
-    let access_token = generate_token(user_id, 1).map_err(LoginError::UnexpectedError)?;
+    let access_token = generate_token(user_id, 1).context("Failed to create access token")?;
 
     let token_response = Token {
         access_token,

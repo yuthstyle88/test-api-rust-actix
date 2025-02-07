@@ -6,11 +6,14 @@ use anyhow::Ok;
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use chrono::Utc;
+use jsonwebtoken::decode;
+use jsonwebtoken::DecodingKey;
+use jsonwebtoken::Validation;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rand::rngs::OsRng;
 use rsa::{
     pkcs8::{EncodePrivateKey, EncodePublicKey},
-    RsaPrivateKey, RsaPublicKey,
+    RsaPrivateKey,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -53,7 +56,7 @@ pub fn generate_token(user_id: Uuid, expires_in: i64) -> Result<String, anyhow::
     ensure_keys_exist()?;
 
     let current_time = Utc::now();
-    let actix_duration = ActixDuration::hours(expires_in);
+    let actix_duration = ActixDuration::minutes(expires_in);
     let duration_in_seconds = actix_duration.as_seconds_f32() as i64;
 
     let expiration =
@@ -64,31 +67,22 @@ pub fn generate_token(user_id: Uuid, expires_in: i64) -> Result<String, anyhow::
         exp: expiration,
     };
 
-    let token = encode(
-        &Header::new(Algorithm::RS256),
-        &claims,
-        &EncodingKey::from_rsa_pem(include_bytes!("private.pem"))?,
-    )?;
+    let private_key_pem = fs::read_to_string("private.pem")?;
+    let encoding_key = EncodingKey::from_rsa_pem(private_key_pem.as_bytes())?;
+
+    let token = encode(&Header::new(Algorithm::RS256), &claims, &encoding_key)?;
 
     Ok(token)
 }
 
-// fn verify_jwt(token: &str) -> Result<Claims, anyhow::Error> {
-//     let decoding_key = DecodingKey::from_rsa_pem(include_bytes!("private.pem"))?;
-//     let validation = Validation {
-//         leeway: 0,
-//         validate_exp: true,
-//         validate_nbf: false,
-//         algorithms: vec![Algorithm::RS256],
-//         required_spec_claims: todo!(),
-//         reject_tokens_expiring_in_less_than: todo!(),
-//         validate_aud: todo!(),
-//         aud: todo!(),
-//         iss: todo!(),
-//         sub: todo!(),
-//         validate_signature: todo!(),
-//     };
+fn verify_jwt(token: &str) -> Result<Claims, anyhow::Error> {
+    let public_key_pem = fs::read_to_string("public.pem")?;
+    let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
 
-//     let decoded_token = decode::<Claims>(token, &decoding_key, &validation)?;
-//     Ok(decoded_token.claims)
-// }
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.validate_exp = true;
+
+    let decoded_token = decode::<Claims>(token, &decoding_key, &validation)?;
+
+    Ok(decoded_token.claims)
+}
