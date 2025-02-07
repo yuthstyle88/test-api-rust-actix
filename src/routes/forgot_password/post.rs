@@ -1,16 +1,15 @@
 use actix_web::{http::StatusCode, web, HttpResponse, ResponseError};
 use anyhow::Context;
-use chrono::{Duration, Utc};
+use chrono::{Duration, NaiveDateTime, Utc};
+use lettre::{Message, SmtpTransport, Transport};
 use log::error;
+use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use rand::{distributions::Alphanumeric, Rng};
-use lettre::{Message, SmtpTransport, Transport};
 
 use crate::{authentication::compute_password_hash, utils::is_valid_email};
 
-
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 pub struct ForgotPasswordRequest {
     email: String,
 }
@@ -19,7 +18,13 @@ pub struct ForgotPasswordRequest {
 pub struct ForgotPasswordData {
     email: String,
     new_password: String,
-    tokens: String,
+    token: String,
+}
+
+#[derive(Debug)]
+pub enum StoreResetTokenResponse {
+    TokenStillValid,
+    TokenCreated,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +37,15 @@ pub enum ForgotPasswordError {
 
     #[error("Invalid verification code")]
     InvalidVerificationCodeError,
+
+    #[error("Database error, {0}")]
+    DatabaseError(#[from] sqlx::Error),
+
+    #[error("Token error, {0}")]
+    TokenStillValid(String),
+
+    #[error("Token storage failed, {0}")]
+    StoreTokenFailed(String),
 
     #[error("Something went wrong")]
     UnexpectedError(#[from] anyhow::Error),
@@ -46,8 +60,14 @@ struct ErrorResponse {
 impl ResponseError for ForgotPasswordError {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::EmailNotFoundError | Self::InvalidEmailFormatError | Self::InvalidVerificationCodeError => StatusCode::BAD_REQUEST,
+            Self::EmailNotFoundError
+            | Self::InvalidEmailFormatError
+            | Self::InvalidVerificationCodeError => StatusCode::BAD_REQUEST,
+
+            Self::DatabaseError(_) | Self::StoreTokenFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+
             Self::UnexpectedError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::TokenStillValid(_) => StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -64,26 +84,23 @@ pub async fn request_password_reset(
     forgot_password_request: web::Json<ForgotPasswordRequest>,
     pool: web::Data<PgPool>,
 ) -> Result<HttpResponse, ForgotPasswordError> {
-    if !is_valid_email(&forgot_password_request.email) {
+    if (!is_valid_email(&forgot_password_request.email)) {
         return Err(ForgotPasswordError::InvalidEmailFormatError);
     }
-
-    let user_id = get_user_id_by_email(&pool, &forgot_password_request.email).await?;
-
-    // Generate a 6-digit random token
+    println!("Email is valid");
     let token: String = rand::thread_rng()
         .sample_iter(&rand::distributions::Alphanumeric)
         .take(6)
         .map(char::from)
         .collect();
 
-    let expired_at = Utc::now() + chrono::Duration::minutes(10);
+    let expired_at = Utc::now() + chrono::Duration::minutes(1);
 
-    store_reset_token(&pool, user_id, &token, expired_at).await?;
-    send_email(&forgot_password_request.email, &token).await;
-
+    store_reset_token(&pool, &forgot_password_request.email, &token, expired_at).await?;
+    println!("Token stored");
     Ok(HttpResponse::Ok().json(serde_json::json!({
-        "message": "Verification code sent to your email"
+        "message": "Verification code sent to your email",
+        "reset-token": token
     })))
 }
 
@@ -97,17 +114,24 @@ pub async fn forgot_password(
 
     if !check_email_existence(&pool, &forgot_password_data.email)
         .await
-        .context("Unexpected error occurs when checking email existence.")?
+        .context("Email is not found.")?
     {
         return Err(ForgotPasswordError::EmailNotFoundError);
     }
+
+    verify_reset_token(
+        &pool,
+        &forgot_password_data.email,
+        &forgot_password_data.token,
+    )
+    .await?;
 
     let new_password_hash = compute_password_hash(forgot_password_data.new_password.clone())
         .map_err(ForgotPasswordError::UnexpectedError)?;
 
     update_user_password(&pool, forgot_password_data.email.clone(), new_password_hash)
         .await
-        .context("Failed to update user password.")?;
+        .context("Failed while updating your password.")?;
 
     Ok(HttpResponse::Ok().json(serde_json::json!({"message": "Password updated successfully"})))
 }
@@ -131,36 +155,59 @@ async fn update_user_password(
     Ok(())
 }
 
-async fn get_user_id_by_email(pool: &PgPool, email: &str) -> Result<uuid::Uuid, ForgotPasswordError> {
-    let user_id: Option<uuid::Uuid> = sqlx::query_scalar!(
-        "SELECT id FROM users WHERE email = $1",
+async fn store_reset_token(
+    pool: &PgPool,
+    email: &str,
+    token: &str,
+    expired_at: chrono::DateTime<Utc>,
+) -> Result<StoreResetTokenResponse, ForgotPasswordError> {
+    let expired_at_naive = expired_at.naive_utc();
+
+    let existing_token = sqlx::query!(
+        "SELECT expired_at FROM forgot_password_tokens WHERE email = $1 ORDER BY expired_at DESC LIMIT 1",
         email
     )
     .fetch_optional(pool)
     .await
-    .context("Failed to fetch user by email.")?;
+    .context("Failed to check for existing reset token")?;
 
-    user_id.ok_or(ForgotPasswordError::EmailNotFoundError)
-}
+    if let Some(record) = existing_token {
+        if let Some(existing_expired_at) = record.expired_at {
+            let current_time = Utc::now().naive_utc();
+            let current_time_epoch = current_time.timestamp();
+            let existing_expired_at_epoch = existing_expired_at.timestamp();
 
-async fn store_reset_token(
-    pool: &PgPool,
-    user_id: uuid::Uuid,
-    token: &str,
-    expired_at: chrono::DateTime<Utc>,
-) -> Result<(), ForgotPasswordError> {
+            println!(
+                "Current time: {:?}, Existing expired at: {:?}",
+                current_time_epoch, existing_expired_at_epoch
+            );
+
+            if existing_expired_at_epoch > current_time_epoch {
+                println!("Token exists and has not expired. No new token will be created.");
+                return Err(ForgotPasswordError::TokenStillValid(
+                    "We have sent your token, please wait for 60 seconds.".to_string(),
+                ));
+            }
+        }
+        println!("Token exists but has expired, a new one will be created.");
+    } else {
+        println!("No existing token found, creating a new one.");
+    }
+
+    println!("Inserting new token now...");
     sqlx::query!(
-        "INSERT INTO forgot_password_tokens (user_id, token, expired_at)
-         VALUES ($1, $2, $3) ON CONFLICT (user_id) DO UPDATE SET token = $2, expired_at = $3",
-        user_id,
+        "INSERT INTO forgot_password_tokens (email, token, expired_at)
+         VALUES ($1, $2, $3)",
+        email,
         token,
-        expired_at
+        expired_at_naive
     )
     .execute(pool)
     .await
-    .context("Failed to store reset token")?;
+    .context("Failed to insert reset token")?;
 
-    Ok(())
+    println!("New token created");
+    Ok(StoreResetTokenResponse::TokenCreated)
 }
 
 async fn check_email_existence(pool: &PgPool, email: &str) -> Result<bool, sqlx::Error> {
@@ -170,4 +217,33 @@ async fn check_email_existence(pool: &PgPool, email: &str) -> Result<bool, sqlx:
             .await?
             .unwrap_or(false),
     )
+}
+
+async fn verify_reset_token(
+    pool: &PgPool,
+    email: &str,
+    token: &str,
+) -> Result<(), ForgotPasswordError> {
+    let record = sqlx::query!(
+        "SELECT expired_at FROM forgot_password_tokens WHERE email = $1 AND token = $2",
+        email,
+        token
+    )
+    .fetch_optional(pool)
+    .await
+    .context("Failed to verify reset token")?;
+
+    match record {
+        Some(record) => {
+            if let Some(expired_at) = record.expired_at {
+                if expired_at < Utc::now().naive_utc() {
+                    return Err(ForgotPasswordError::InvalidVerificationCodeError);
+                }
+                Ok(())
+            } else {
+                Err(ForgotPasswordError::InvalidVerificationCodeError)
+            }
+        }
+        None => Err(ForgotPasswordError::InvalidVerificationCodeError),
+    }
 }
