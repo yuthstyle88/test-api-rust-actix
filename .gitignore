@@ -14,3 +14,6 @@ target/
 # RustRover
 # uncomment the following to ignore the entire idea folder (Optional)
 .idea/
+
+# Key
+*.pem

@@ -10,8 +10,11 @@ argon2 = "0.5.3"
 chrono = { version = "0.4.39", features = ["serde"] }
 config = { version = "0.15.7", default-features = false, features = ["yaml"] }
 env_logger = "0.11.6"
+jsonwebtoken = "9.3.0"
 log = "0.4.25"
+rand = { version = "0.8", features = ["std", "getrandom", "small_rng"] }
 regex = "1.11.1"
+rsa = "0.9.7"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.138"
 sqlx = { version = "0.8.3", features = ["postgres", "uuid", "chrono", "runtime-tokio"] }
