@@ -7,7 +7,7 @@ use sqlx::PgPool;
 
 use crate::{authentication::compute_password_hash, utils::is_valid_email};
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
 pub struct RegisterData {
     email: String,
     password: String,
@@ -48,6 +48,10 @@ impl ResponseError for RegisterError {
     }
 }
 
+#[tracing::instrument(
+    skip(register_data, pool),
+    fields(email=tracing::field::Empty, password=tracing::field::Empty)
+)]
 pub async fn register(
     register_data: web::Json<RegisterData>,
     pool: web::Data<PgPool>,

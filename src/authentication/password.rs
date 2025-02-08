@@ -5,12 +5,14 @@ use argon2::{
 };
 use sqlx::PgPool;
 
+use crate::telemetry::spawn_blocking_with_tracing;
+
 #[derive(thiserror::Error, Debug)]
 pub enum AuthError {
     #[error("Invalid credentials.")]
     InvalidCredentials(#[source] anyhow::Error),
 
-    #[error(transparent)]
+    #[error("Something went wrong")]
     UnexpectedError(#[from] anyhow::Error),
 }
 
@@ -20,6 +22,7 @@ pub struct Credentials {
     pub password: String,
 }
 
+#[tracing::instrument(name = "Get stored credentials", skip(email, pool))]
 async fn get_stored_credentials(
     email: &str,
     pool: &PgPool,
@@ -39,6 +42,7 @@ async fn get_stored_credentials(
     Ok(row)
 }
 
+#[tracing::instrument(name = "Validate credentials", skip(credentials, pool))]
 pub async fn validate_credentials(
     credentials: Credentials,
     pool: &PgPool,
@@ -49,18 +53,31 @@ pub async fn validate_credentials(
         get_stored_credentials(&credentials.email, pool).await?
     {
         user_id = Some(stored_user_id);
-        verify_password_hash(stored_password_hash, credentials.password)?;
+        let is_valid = spawn_blocking_with_tracing(move || {
+            verify_password_hash(stored_password_hash, credentials.password)
+        })
+        .await
+        .map_err(|e| AuthError::UnexpectedError(anyhow::anyhow!(e)))?
+        .map_err(|_| AuthError::InvalidCredentials(anyhow::anyhow!("Invalid password.")))?;
+
+        if !is_valid {
+            return Err(AuthError::InvalidCredentials(anyhow::anyhow!(
+                "Invalid password."
+            )));
+        }
     }
 
-    user_id
-        .ok_or_else(|| AuthError::InvalidCredentials(anyhow::anyhow!("Unknown user.")))
+    user_id.ok_or_else(|| AuthError::InvalidCredentials(anyhow::anyhow!("Unknown user.")))
 }
 
-
+#[tracing::instrument(
+    name = "Validate credentials",
+    skip(expected_password_hash, password_candidate)
+)]
 fn verify_password_hash(
     expected_password_hash: String,
     password_candidate: String,
-) -> Result<(), AuthError> {
+) -> Result<bool, AuthError> {
     let expected_password_hash = PasswordHash::new(&expected_password_hash)
         .map_err(|e| AuthError::InvalidCredentials(anyhow::anyhow!("Failed to parse hash: {e}")))?;
 
@@ -68,7 +85,7 @@ fn verify_password_hash(
         .verify_password(password_candidate.as_bytes(), &expected_password_hash)
         .map_err(|e| AuthError::InvalidCredentials(anyhow::anyhow!("Invalid password: {e}")))?;
 
-    Ok(())
+    Ok(true)
 }
 
 pub fn compute_password_hash(password: String) -> Result<String, Error> {

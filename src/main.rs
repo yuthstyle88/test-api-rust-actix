@@ -1,10 +1,13 @@
-use log::info;
-use test_api_rust_actix::{configuration::get_configuration, startup::Application};
+use test_api_rust_actix::{
+    configuration::get_configuration,
+    startup::Application,
+    telemetry::{get_subscriber, init_subscriber},
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
-    info!("Starting the application...");
+    let subscriber = get_subscriber("info".into(), std::io::stdout);
+    init_subscriber(subscriber);
 
     let configuration = get_configuration().expect("Failed to read configuration.");
     let application = Application::build(configuration).await?;
