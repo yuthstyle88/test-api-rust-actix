@@ -6,11 +6,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    authentication::{generate_token, validate_credentials, Credentials},
+    authentication::{generate_token, validate_credentials, AuthError, Credentials},
     utils::is_valid_email,
 };
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
 pub struct LoginData {
     email: String,
     password: String,
@@ -57,6 +57,10 @@ struct Token {
     refresh_token: String,
 }
 
+#[tracing::instrument(
+    skip(login_data, pool),
+    fields(email=tracing::field::Empty, user_id=tracing::field::Empty)
+)]
 pub async fn login(
     login_data: web::Json<LoginData>,
     pool: web::Data<PgPool>,
@@ -72,7 +76,10 @@ pub async fn login(
 
     let user_id = validate_credentials(credentials, &pool)
         .await
-        .context("Failed to validate credentials")?;
+        .map_err(|e| match e {
+            AuthError::InvalidCredentials(_) => LoginError::AuthError,
+            _ => LoginError::UnexpectedError(anyhow::anyhow!("Failed to validate credentials")),
+        })?;
 
     let access_token = generate_token(user_id, 1).context("Failed to create access token")?;
 

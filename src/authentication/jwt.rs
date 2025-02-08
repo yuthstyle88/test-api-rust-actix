@@ -6,9 +6,6 @@ use anyhow::Ok;
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use chrono::Utc;
-use jsonwebtoken::decode;
-use jsonwebtoken::DecodingKey;
-use jsonwebtoken::Validation;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rand::rngs::OsRng;
 use rsa::{
@@ -75,7 +72,7 @@ pub fn generate_token(user_id: Uuid, expires_in: i64) -> Result<String, anyhow::
     Ok(token)
 }
 
-fn verify_jwt(token: &str) -> Result<Claims, anyhow::Error> {
+/* fn verify_jwt(token: &str) -> Result<Claims, anyhow::Error> {
     let public_key_pem = fs::read_to_string("public.pem")?;
     let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
 
@@ -85,4 +82,4 @@ fn verify_jwt(token: &str) -> Result<Claims, anyhow::Error> {
     let decoded_token = decode::<Claims>(token, &decoding_key, &validation)?;
 
     Ok(decoded_token.claims)
-}
+} */
