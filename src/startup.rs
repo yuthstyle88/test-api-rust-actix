@@ -8,8 +8,9 @@ use actix_web::{
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 use crate::{
+    authentication::JwtMiddleware,
     configuration::{DatabaseSettings, Settings},
-    routes::{login, register},
+    routes::{get_user_by_id, get_users, login, register},
 };
 
 pub struct Application {
@@ -65,7 +66,17 @@ pub async fn run(
             .service(
                 web::scope("/api/v1")
                     .route("/register", web::post().to(register))
-                    .route("/login", web::post().to(login)),
+                    .route("/login", web::post().to(login))
+                    .service(
+                        web::scope("/users")
+                            .wrap(JwtMiddleware::new(Some("Customer".to_string())))
+                            .route("/{id}", web::get().to(get_user_by_id)),
+                    )
+                    .service(
+                        web::scope("/admin")
+                            .wrap(JwtMiddleware::new(Some("Admin".to_string())))
+                            .route("/users", web::get().to(get_users)),
+                    ),
             )
             .app_data(db_pool.clone())
             .app_data(base_url.clone())

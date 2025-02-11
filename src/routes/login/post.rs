@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     authentication::{generate_token, validate_credentials, AuthError, Credentials},
+    routes::UserDto,
     utils::is_valid_email,
 };
 
@@ -81,7 +82,17 @@ pub async fn login(
             _ => LoginError::UnexpectedError(anyhow::anyhow!("Failed to validate credentials")),
         })?;
 
-    let access_token = generate_token(user_id, 1).context("Failed to create access token")?;
+    let found_user = get_user_by_id(&pool, user_id)
+        .await
+        .context("Unexpected error")?;
+
+    let role_name = get_role_name_by_id(&pool, found_user.unwrap().role_id)
+        .await
+        .context("Unexpected error")?
+        .ok_or_else(|| anyhow::anyhow!("Role not found"))?;
+
+    let access_token =
+        generate_token(user_id, role_name, 1).context("Failed to create access token")?;
 
     let token_response = Token {
         access_token,
@@ -89,4 +100,36 @@ pub async fn login(
     };
 
     Ok(HttpResponse::Ok().json(token_response))
+}
+
+async fn get_role_name_by_id(pool: &PgPool, id: Uuid) -> Result<Option<String>, sqlx::Error> {
+    let row = sqlx::query!("SELECT name FROM roles WHERE id = $1", id)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(row.map(|r| r.name))
+}
+
+async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<Option<UserDto>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, email, password, created_at, updated_at, role_id
+        FROM users
+        WHERE id = $1
+        "#,
+        user_id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let user = row.map(|row| UserDto {
+        id: row.id,
+        email: row.email,
+        password: row.password,
+        created_at: row.created_at.naive_utc(),
+        updated_at: row.updated_at.naive_utc(),
+        role_id: row.role_id,
+    });
+
+    Ok(user)
 }

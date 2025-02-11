@@ -10,4 +10,5 @@ pub struct User {
     pub password: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub role_id: Uuid,
 }
