@@ -4,6 +4,7 @@ use chrono::Utc;
 use log::error;
 use serde::Serialize;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::{authentication::compute_password_hash, utils::is_valid_email};
 
@@ -85,13 +86,15 @@ async fn create_new_user(
     email: String,
     password_hash: String,
 ) -> Result<(), sqlx::Error> {
+    let role_id = get_role_id(pool, "Customer".into()).await?;
     let _ = sqlx::query!(
         r#"
-        INSERT INTO users (email, password) 
-        VALUES ($1, $2)
+        INSERT INTO users (email, password, role_id) 
+        VALUES ($1, $2, $3)
         "#,
         email,
-        password_hash
+        password_hash,
+        role_id
     )
     .execute(pool)
     .await?;
@@ -106,4 +109,12 @@ async fn check_email_existence(pool: &PgPool, email: &str) -> Result<bool, sqlx:
             .await?
             .unwrap_or(false),
     )
+}
+
+async fn get_role_id(pool: &PgPool, name: &str) -> Result<Uuid, sqlx::Error> {
+    let row = sqlx::query!("SELECT id FROM roles WHERE name = $1", name)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(row.id)
 }

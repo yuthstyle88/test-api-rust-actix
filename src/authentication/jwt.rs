@@ -1,11 +1,16 @@
 use std::fs;
 use std::path::Path;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use actix_web::cookie::time::Duration as ActixDuration;
 use anyhow::Ok;
 use anyhow::Result;
 use chrono::Duration as ChronoDuration;
 use chrono::Utc;
+use jsonwebtoken::decode;
+use jsonwebtoken::DecodingKey;
+use jsonwebtoken::Validation;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use rand::rngs::OsRng;
 use rsa::{
@@ -16,9 +21,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    exp: usize,
+pub struct Claims {
+    pub sub: String,
+    pub role: String,
+    pub exp: usize,
 }
 
 fn ensure_keys_exist() -> Result<()> {
@@ -49,7 +55,11 @@ fn ensure_keys_exist() -> Result<()> {
     Ok(())
 }
 
-pub fn generate_token(user_id: Uuid, expires_in: i64) -> Result<String, anyhow::Error> {
+pub fn generate_token(
+    user_id: Uuid,
+    role_name: String,
+    expires_in: i64,
+) -> Result<String, anyhow::Error> {
     ensure_keys_exist()?;
 
     let current_time = Utc::now();
@@ -61,6 +71,7 @@ pub fn generate_token(user_id: Uuid, expires_in: i64) -> Result<String, anyhow::
 
     let claims = Claims {
         sub: user_id.to_string(),
+        role: role_name,
         exp: expiration,
     };
 
@@ -72,7 +83,7 @@ pub fn generate_token(user_id: Uuid, expires_in: i64) -> Result<String, anyhow::
     Ok(token)
 }
 
-/* fn verify_jwt(token: &str) -> Result<Claims, anyhow::Error> {
+pub fn verify_jwt(token: &str) -> Result<Claims, anyhow::Error> {
     let public_key_pem = fs::read_to_string("public.pem")?;
     let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
 
@@ -81,5 +92,11 @@ pub fn generate_token(user_id: Uuid, expires_in: i64) -> Result<String, anyhow::
 
     let decoded_token = decode::<Claims>(token, &decoding_key, &validation)?;
 
-    Ok(decoded_token.claims)
-} */
+    let claims = decoded_token.claims;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as usize;
+    if claims.exp < now {
+        return Err(anyhow::anyhow!("Token has expired"));
+    }
+
+    Ok(claims)
+}
