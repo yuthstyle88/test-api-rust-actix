@@ -20,8 +20,9 @@ pub struct Application {
 
 impl Application {
     pub async fn build(configuration: Settings) -> Result<Self, anyhow::Error> {
-        let connection_pool =
-            get_connection_pool(&configuration.database).expect("Failed to connect to Postgres.");
+        let connection_pool = get_connection_pool(&configuration.database)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to connect to database: {}", e))?;
 
         let address = format!(
             "{}:{}",
@@ -48,8 +49,17 @@ impl Application {
     }
 }
 
-pub fn get_connection_pool(configuration: &DatabaseSettings) -> Result<PgPool, anyhow::Error> {
-    Ok(PgPoolOptions::new().connect_lazy_with(configuration.connect_options()))
+async fn get_connection_pool(configuration: &DatabaseSettings) -> Result<PgPool, anyhow::Error> {
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(configuration.connect_options())
+        .await?;
+
+    if let Err(err) = pool.acquire().await {
+        return Err(anyhow::anyhow!("Database connection failed: {}", err));
+    }
+
+    Ok(pool)
 }
 
 pub struct ApplicationBaseUrl(pub String);

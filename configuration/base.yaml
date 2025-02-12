@@ -6,4 +6,4 @@ database:
   port: 5432
   username: "postgres"
   password: "12345"
-  database_name: "test-api-rust-actix-db"
+  database_name: "test-api-db"
