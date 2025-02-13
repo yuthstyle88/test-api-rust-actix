@@ -1,0 +1,124 @@
+use super::jwt::verify_jwt;
+use actix_web::{
+    body::{BoxBody, MessageBody},
+    dev::{Service, ServiceRequest, ServiceResponse, Transform},
+    Error, HttpMessage, HttpResponse,
+};
+use casbin::{CoreApi, Enforcer};
+use futures_util::{
+    future::{ok, Ready},
+    FutureExt,
+};
+use std::{
+    future::Future,
+    pin::Pin,
+    rc::Rc,
+    sync::Arc,
+    task::{Context, Poll},
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::sync::RwLock;
+
+pub struct JwtCasbinMiddleware {
+    enforcer: Arc<RwLock<Enforcer>>,
+}
+
+impl JwtCasbinMiddleware {
+    pub fn new(enforcer: Arc<RwLock<Enforcer>>) -> Self {
+        Self { enforcer }
+    }
+}
+
+impl<S, B> Transform<S, ServiceRequest> for JwtCasbinMiddleware
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    B: MessageBody + 'static,
+{
+    type Response = ServiceResponse<BoxBody>;
+    type Error = Error;
+    type Transform = JwtCasbinMiddlewareService<S>;
+    type InitError = ();
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        ok(JwtCasbinMiddlewareService {
+            service: Rc::new(service),
+            enforcer: self.enforcer.clone(),
+        })
+    }
+}
+
+pub struct JwtCasbinMiddlewareService<S> {
+    service: Rc<S>,
+    enforcer: Arc<RwLock<Enforcer>>,
+}
+
+impl<S, B> Service<ServiceRequest> for JwtCasbinMiddlewareService<S>
+where
+    S: Service<ServiceRequest, Response = ServiceResponse<B>, Error = Error> + 'static,
+    B: MessageBody + 'static,
+{
+    type Response = ServiceResponse<BoxBody>;
+    type Error = Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    fn poll_ready(&self, ctx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.service.poll_ready(ctx)
+    }
+
+    fn call(&self, req: ServiceRequest) -> Self::Future {
+        let service = self.service.clone();
+        let headers = req.headers().clone();
+        let enforcer = self.enforcer.clone();
+
+        async move {
+            let token = headers
+                .get("Authorization")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.strip_prefix("Bearer "))
+                .map(String::from);
+
+            if let Some(token) = token {
+                if let Ok(claims) = verify_jwt(&token) {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as usize;
+
+                    if claims.exp < now {
+                        return Ok(req.into_response(
+                            HttpResponse::Unauthorized()
+                                .body("Unauthorized: Token has expired")
+                                .map_into_boxed_body(),
+                        ));
+                    }
+
+                    let sub = claims.role.clone();
+                    let obj = req.path().to_string();
+                    let act = req.method().to_string();
+
+                    let enforcer_read = enforcer.read().await;
+                    let authorized = enforcer_read.enforce((sub, obj, act)).unwrap_or(false);
+
+                    if !authorized {
+                        return Ok(req.into_response(
+                            HttpResponse::Forbidden()
+                                .body("Forbidden: Insufficient permissions")
+                                .map_into_boxed_body(),
+                        ));
+                    }
+
+                    req.extensions_mut().insert(claims);
+                    return service.call(req).await.map(|res| res.map_into_boxed_body());
+                }
+            }
+
+            Ok(req.into_response(
+                HttpResponse::Unauthorized()
+                    .body("Unauthorized: Invalid token")
+                    .map_into_boxed_body(),
+            ))
+        }
+        .boxed_local()
+    }
+}

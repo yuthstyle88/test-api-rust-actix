@@ -1,0 +1,4 @@
+p, Admin, /api/v1/admin/users, GET
+p, Customer, /api/v1/users/*, GET
+g, john, Customer
+g, alice, Admin

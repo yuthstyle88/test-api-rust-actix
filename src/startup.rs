@@ -1,14 +1,17 @@
-use std::net::TcpListener;
+use std::{net::TcpListener, sync::Arc};
 
 use actix_web::{
     dev::Server,
+    middleware::Logger,
     web::{self, Data},
     App, HttpServer,
 };
+use casbin::{CoreApi, DefaultModel, Enforcer, FileAdapter};
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use tokio::sync::RwLock;
 
 use crate::{
-    authentication::JwtMiddleware,
+    authentication::{JwtCasbinMiddleware, JwtMiddleware},
     configuration::{DatabaseSettings, Settings},
     routes::{get_user_by_id, get_users, login, register},
 };
@@ -24,6 +27,11 @@ impl Application {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to database: {}", e))?;
 
+        // ✅ Initialize Casbin Enforcer
+        let model = DefaultModel::from_file("rbac_model.conf").await?;
+        let adapter = FileAdapter::new("policy.csv");
+        let enforcer = Arc::new(RwLock::new(Enforcer::new(model, adapter).await?));
+
         let address = format!(
             "{}:{}",
             configuration.application.host, configuration.application.port
@@ -34,6 +42,7 @@ impl Application {
             listener,
             connection_pool,
             configuration.application.base_url,
+            enforcer,
         )
         .await?;
 
@@ -68,9 +77,12 @@ pub async fn run(
     listener: TcpListener,
     db_pool: PgPool,
     base_url: String,
+    enforcer: Arc<RwLock<Enforcer>>,
 ) -> Result<Server, anyhow::Error> {
     let db_pool = Data::new(db_pool);
     let base_url = Data::new(ApplicationBaseUrl(base_url));
+    let enforcer = Data::new(enforcer);
+
     let server = HttpServer::new(move || {
         App::new()
             .service(
@@ -79,19 +91,21 @@ pub async fn run(
                     .route("/login", web::post().to(login))
                     .service(
                         web::scope("/users")
-                            .wrap(JwtMiddleware::new(Some("Customer".to_string())))
+                            .wrap(JwtCasbinMiddleware::new(enforcer.as_ref().clone()))
                             .route("/{id}", web::get().to(get_user_by_id)),
                     )
                     .service(
                         web::scope("/admin")
-                            .wrap(JwtMiddleware::new(Some("Admin".to_string())))
+                            .wrap(JwtCasbinMiddleware::new(enforcer.as_ref().clone()))
                             .route("/users", web::get().to(get_users)),
                     ),
             )
             .app_data(db_pool.clone())
             .app_data(base_url.clone())
+            .app_data(enforcer.clone())
     })
     .listen(listener)?
     .run();
+
     Ok(server)
 }
