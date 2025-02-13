@@ -13,21 +13,19 @@ use std::{
     future::Future,
     pin::Pin,
     rc::Rc,
+    sync::Arc,
     task::{Context, Poll},
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::sync::RwLock;
 
 pub struct JwtCasbinMiddleware {
-    required_role: Option<String>,
-    enforcer: Rc<Enforcer>,
+    enforcer: Arc<RwLock<Enforcer>>,
 }
 
 impl JwtCasbinMiddleware {
-    pub fn new(required_role: Option<String>, enforcer: Enforcer) -> Self {
-        Self {
-            required_role,
-            enforcer: Rc::new(enforcer),
-        }
+    pub fn new(enforcer: Arc<RwLock<Enforcer>>) -> Self {
+        Self { enforcer }
     }
 }
 
@@ -45,7 +43,6 @@ where
     fn new_transform(&self, service: S) -> Self::Future {
         ok(JwtCasbinMiddlewareService {
             service: Rc::new(service),
-            required_role: self.required_role.clone(),
             enforcer: self.enforcer.clone(),
         })
     }
@@ -53,8 +50,7 @@ where
 
 pub struct JwtCasbinMiddlewareService<S> {
     service: Rc<S>,
-    required_role: Option<String>,
-    enforcer: Rc<Enforcer>,
+    enforcer: Arc<RwLock<Enforcer>>,
 }
 
 impl<S, B> Service<ServiceRequest> for JwtCasbinMiddlewareService<S>
@@ -88,6 +84,7 @@ where
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_secs() as usize;
+
                     if claims.exp < now {
                         return Ok(req.into_response(
                             HttpResponse::Unauthorized()
@@ -100,7 +97,8 @@ where
                     let obj = req.path().to_string();
                     let act = req.method().to_string();
 
-                    let authorized = enforcer.enforce((sub, obj, act)).unwrap_or(false);
+                    let enforcer_read = enforcer.read().await;
+                    let authorized = enforcer_read.enforce((sub, obj, act)).unwrap_or(false);
 
                     if !authorized {
                         return Ok(req.into_response(
