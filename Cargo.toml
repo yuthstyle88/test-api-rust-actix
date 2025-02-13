@@ -7,6 +7,7 @@ edition = "2021"
 actix-web = "4.9.0"
 anyhow = "1.0.95"
 argon2 = "0.5.3"
+casbin = "2.10.1"
 chrono = { version = "0.4.39", features = ["serde"] }
 config = { version = "0.15.7", default-features = false, features = ["yaml"] }
 env_logger = "0.11.6"
